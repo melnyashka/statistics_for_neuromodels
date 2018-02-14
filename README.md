@@ -7,4 +7,4 @@ Small introduction:
 + *hawkes_approximation* (implementation of the stochastic diffusion which approximates the Hawkes process, from paper by Eva Löcherbach and Susanne Ditlevsen "Multi-class oscillating systems of interacting neurons)
 + *FHN.simulate* (simulations of FitzHugh-Nagumo model with higher-order scheme)
 
-If you have noticed any inaccuracies - you can contact me (up-to-date contact information is available on my [website](amelnykova.com)). 
+If you have noticed any inaccuracies - you can contact me (up-to-date contact information is available on my [website](http://amelnykova.com)). 
