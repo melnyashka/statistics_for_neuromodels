@@ -70,10 +70,24 @@ FHN.simulate <- function(parameters, N, delta, class = 1){
   return(rbind(X, Y))
 }
 
+ML.simulate <- function(parameters, N, delta, class = 1){
+  X <- numeric()
+  Y <- numeric()
+  I <- parameters[1]   # applied current
+  C <- parameters[2]   # membrane capacitance
+  g <- parameters[3:5] # conductances
+  V <- parameters[6:12] # equilibrium potentials + tuning parameters
+  phi <- parameters[13] # reference frequency
+  for (i in 1:N){
+    Mss = 0.5*(1+tanh((Y - V[4])/V[5]))
+  }
+}
+
 gather_statistics <- function(Z, delta){
   # As an input we take a matrix dxN, where d is the dimensionality of the process, N --- available observations
   dimZ <- dim(Z)
   d = dimZ[1]
+  N = dimZ[2]
   S1_vec <- numeric()
   S2_vec <- numeric()
   # modify the process, generating another Brownian motion
@@ -112,18 +126,46 @@ build_plot <- function(Z, ind_rough){
 #############  Executable part    ######################
 ########################################################
 
+require("futile.logger") # setting up logging
+# require("Matrix")
+setwd("University/neuroscience/Dimensionality_tests") # comment/uncomment if necessary
+date <- Sys.Date()          # Create a subdirectory with the current date
+wd <- getwd()               # Save the name of the working directory 
+path_to_logs <- file.path(wd,date)
+dir.create(path_to_logs)
+file <- paste(path_to_logs, "logfile", sep = "/")
+#flog.appender(appender.file(file))
+flog.appender(appender.tee(file)) # write both to console and to file 
+flog.threshold(DEBUG)        # By default set threshold to INFO (because I can)
+flog.debug("Debugging is on!") 
+
+##### Experimental part  ######
+
 n_pop = 2 # number of populations
 n_neur = c(20, 20) # number of neurons in population, vector of integers of length N
-eta = c(3,2) # number of memory variables, vector of integers of length N
-nu = c(0.8,0.8) # auxilliary constants
-c_rate = c(-1, 1) # rates of population
+eta = c(4,4) # number of memory variables, vector of integers of length N
+nu = c(1,1) # auxilliary constants
+c_rate = c(-1,1) # rates of population
 K = c(1, 10) # constants for the rate functions
 
-N = 10000       # number of observations
-delta = 0.01     # discretization step 
+N_set = c(500, 5000, 50000, 500000)     # number of observations
+delta_set = c(0.1, 0.01, 0.001, 0.0001)    # discretization step 
+N_trials <- 1000
+true_decisions <- numeric()
 
-Z = hawkes_approximation(N = N, delta = delta, n_pop = n_pop, n_neur = n_neur, eta = eta, nu = nu, c_rate = c_rate, K = K)
-gather_statistics(Z, delta)
+flog.debug("We are working with Hawkes model, number of population is %s, number of neurons is %s, eta = %s, nu = %s, c_rate = %s", n_pop, toString(n_neur), toString(eta), toString(nu), toString(c_rate))
+for (k in 1:length(N_set)){
+  Z = hawkes_approximation(N = N_set[k], delta = delta_set[k], n_pop = n_pop, n_neur = n_neur, eta = eta, nu = nu, c_rate = c_rate, K = K)
+  res_trials <- numeric(N_trials)
+  for (i in 1:N_trials){
+    res_trials[i] <- round(gather_statistics(Z, delta_set[k]))
+  }
+  true_decisions[k] = length(which(res_trials == n_pop))/N_trials
+  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials trials is: %s", delta_set[k], N_set[k], N_trials, true_decisions[k])
+}
+
+true_decisions
+hist(res_trials)
 
 ind_rough = numeric(n_pop)
 for (i in 1:n_pop){ind_rough[i] = sum(eta[1:i])+i}
@@ -131,8 +173,25 @@ build_plot(Z, ind_rough)
 
 # now some experiments with FHN
 
-
 real_parameters <- c(1.5, 0.3, 0.1, 0.01, 0.6) # first set
+real_parameters <- c(1.2, 1.3, 0.1, 0.01, 0.4) # second set
 
-Z_h = FHN.simulate(parameters = real_parameters, N = N, delta = delta, class = 1)
-gather_statistics(Z_h, delta)
+
+N_set = c(500, 5000, 50000)     # number of observations
+delta_set = c(0.1, 0.01, 0.001)    # discretization step 
+N_trials <- 1000
+true_decisions <- numeric()
+
+flog.debug("FitzHugh-Nagumo model, set: %s", toString(real_parameters))
+
+for (k in 1:length(N_set)){
+  Z_h = FHN.simulate(parameters = real_parameters, N = N_set[k], delta = delta_set[k], class = 2)
+  res_trials <- numeric(N_trials)
+  for (i in 1:N_trials){
+    res_trials[i] <- round(gather_statistics(Z_h, delta_set[k]))
+  }
+  true_decisions[k] = length(which(res_trials == 2))/N_trials
+  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials trials is: %s", delta_set[k], N_set[k], N_trials, true_decisions[k])
+}
+
+true_decisions
