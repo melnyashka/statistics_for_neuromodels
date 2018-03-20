@@ -1,5 +1,10 @@
 # First we generate the process with arbitrary number of memory variables 
 require(MASS)
+require(Rcpp)
+require(inline)
+require(futile.logger) # setting up logging
+require(parallel)
+sourceCpp("example.cpp")
 
 rate_function <- function(x, const=1){
   # here for simplicity we use the same family of functions
@@ -70,6 +75,25 @@ FHN.simulate <- function(parameters, N, delta, class = 1){
   return(rbind(X, Y))
 }
 
+BM.simulate <- function(N, delta, class = 1){
+  X <- numeric(N)
+  Y <- numeric(N)
+  Bx <- rnorm(N, mean = 0, sd = 1) # Generate increments of Brownian motion
+  By <- rnorm(N, mean = 0, sd = 1) 
+  X[1] <- 0  # Starting points
+  Y[1] <- 0
+  if (class == 1){
+    for (i in 1:(N-1)){
+      X[i+1] <- X[i] # + (delta^(3/2)*By[i] + delta^(3/2)*Bx[i]/sqrt(3))*sigma/2
+      Y[i+1] <- Y[i] + sqrt(delta)*By[i]
+    }} else if (class == 2) {
+      for (i in 1:(N-1)){
+        X[i+1] <- X[i] + sqrt(delta)*Bx[i]
+        Y[i+1] <- Y[i] +  sqrt(delta)*By[i]
+      }} 
+  return(rbind(X, Y))
+}
+
 ML.simulate <- function(parameters, N, delta, class = 1){
   X <- numeric()
   Y <- numeric()
@@ -80,35 +104,8 @@ ML.simulate <- function(parameters, N, delta, class = 1){
   phi <- parameters[13] # reference frequency
   for (i in 1:N){
     Mss = 0.5*(1+tanh((Y - V[4])/V[5]))
+    alpha = 0.5
   }
-}
-
-gather_statistics <- function(Z, delta){
-  # As an input we take a matrix dxN, where d is the dimensionality of the process, N --- available observations
-  dimZ <- dim(Z)
-  d = dimZ[1]
-  N = dimZ[2]
-  S1_vec <- numeric()
-  S2_vec <- numeric()
-  # modify the process, generating another Brownian motion
-  W_d = mvrnorm(n = dimZ[2], mu = rep(0, times = d), Sigma = diag(d))
-  Z1 = Z + delta*t(W_d)
-  Z2 = Z + 2*delta*t(W_d)
-  
-  # Now the calculations:
-  i_lim = floor(N/(2*d)) - 1
-  for (i in 1:i_lim){
-    Z_mat1 <- (Z1[,(2*d*i+1):(2*d*i+d)]-Z1[,(2*d*i):(2*d*i+d-1)])/sqrt(delta)
-    Z_mat2 <- (Z2[,seq(from = (2*d*i+2), to = (2*d*i+2*d), by = 2)]-Z2[,seq(from = (2*d*i), to = (2*d*i+2*d-2), by = 2)])/sqrt(2*delta)
-    S1_vec[i] <- det(Z_mat1%*%Z_mat1)
-    S2_vec[i] <- det(Z_mat2%*%Z_mat2)
-    # S1_vec[i] <- det(Z_mat1)^2
-    # S2_vec[i] <- det(Z_mat2)^2
-  }
-  S1 <- 2*d*delta*sum(S1_vec)
-  S2 <- 2*d*delta*sum(S2_vec)
-  R = d - log(abs(S2/S1))/log(2) 
-  return(R)
 }
 
 build_plot <- function(Z, ind_rough){
@@ -122,76 +119,273 @@ build_plot <- function(Z, ind_rough){
   }
 }
 
+construct_test <- function(Z, delta, j){
+  # As an indput we take a matrix dxN, where d is the dimensionality of the process, N --- available observations
+  dimZ <- dim(Z)
+  j = 1
+  sigma = 1
+  
+  if (is.null(dimZ)) {
+    d = 1
+    N = length(Z)
+  } else {
+    d = dimZ[1]
+    N = dimZ[2]
+  }
+  
+  # modify the process, generating another Brownian motion
+  if (d==1) {
+    W_d <- cumsum(rnorm(n = N, mean = 0, sd = sqrt(delta)))
+    } else {
+      W <- t(mvrnorm(n = N, mu = rep(0, times = d), Sigma = sqrt(delta)*diag(d)))
+      W_d <- matrix(unlist(lapply(c(1:d), function(i) cumsum(W[i,]))), nrow = d, byrow = FALSE)
+      }
+  # if (d==1) {
+  #   W_d <- sigma*rnorm(n = N, mean = 0, sd = sqrt(delta))
+  # } else {
+  #   W_d <- sigma*t(mvrnorm(n = N, mu = rep(0, times = d), Sigma = sqrt(delta)*diag(d)))
+  # }
+  
+  Z1 = add_rcpp(Z,(delta)^(1/2)*W_d)
+  Z2 = add_rcpp(Z,(2*delta)^(1/2)*W_d)
+  
+  # Now the calculations:
+  # Here S1 and S2 correspond to (2.13) on page 2396 from paper, 
+  # V - to (3.17) on page 2401 
+
+  i_lim = floor(N/(2*d)) - 1
+  
+  Z_mat1 <- lapply(c(1:i_lim), function(i) (Z1[,(2*d*i+1):(2*d*i+d)]-Z1[,(2*d*i):(2*d*i+d-1)])/sqrt(delta))
+  Z_mat2 <- lapply(c(1:i_lim), function(i) (Z2[,seq(from = (2*d*i+2), to = (2*d*i+2*d), by = 2)]-Z2[,seq(from = (2*d*i), to = (2*d*i+2*d-2), by = 2)])/sqrt(2*delta))
+  S1_vec <- unlist(lapply(Z_mat1, edet))
+  S2_vec <- unlist(lapply(Z_mat2, edet))
+  
+  S1 <- 2*d*delta*sum_rcpp(S1_vec)
+  S2 <- 2*d*delta*sum_rcpp(S2_vec) 
+  
+  R = d - log(abs(S2/S1))/log(2)  # Value of the "estimator" R hat, formula (3.10)
+  V <- sum_rcpp((add_rcpp_vec(S1_vec, - S2_vec*2^(R-d)))^2)/(delta*(sum_rcpp(S1_vec)*log(2))^2) # the same value, as below, but computed faster
+  # V <- (V11 + 2^(2*(R-d))*V22 - 2^(1+R-d)*V12)/(log(2)*S1)^2
+  return(c(R, V))
+}
+
 ########################################################
 #############  Executable part    ######################
 ########################################################
-
-require("futile.logger") # setting up logging
-# require("Matrix")
 setwd("University/neuroscience/Dimensionality_tests") # comment/uncomment if necessary
 date <- Sys.Date()          # Create a subdirectory with the current date
 wd <- getwd()               # Save the name of the working directory 
 path_to_logs <- file.path(wd,date)
 dir.create(path_to_logs)
 file <- paste(path_to_logs, "logfile", sep = "/")
-#flog.appender(appender.file(file))
+# flog.appender(appender.file(file))
 flog.appender(appender.tee(file)) # write both to console and to file 
 flog.threshold(DEBUG)        # By default set threshold to INFO (because I can)
 flog.debug("Debugging is on!") 
+my_colors <- c(adjustcolor("skyblue", alpha.f = 0.5),  adjustcolor("chartreuse", alpha.f = 0.5), adjustcolor("coral", alpha.f = 0.5), adjustcolor("darkgoldenrod1", alpha.f = 0.5))
 
-##### Experimental part  ######
+# Symmetric quantile values 
+q_95 <- 1.959964
+q_99 <- 2.575829
+q_999 <- 3.290527
+
+##### Experimental part: Hawkes process  ######
 
 n_pop = 2 # number of populations
 n_neur = c(20, 20) # number of neurons in population, vector of integers of length N
-eta = c(4,4) # number of memory variables, vector of integers of length N
+eta = c(2,2) # number of memory variables, vector of integers of length N
 nu = c(1,1) # auxilliary constants
 c_rate = c(-1,1) # rates of population
 K = c(1, 10) # constants for the rate functions
 
-N_set = c(500, 5000, 50000, 500000)     # number of observations
-delta_set = c(0.1, 0.01, 0.001, 0.0001)    # discretization step 
+# N_set = c(500, 5000, 50000, 500000)     # number of observations
+delta_set = c(0.1, 0.01, 0.001, 0.0001, 0.00001)    # discretization step 
 N_trials <- 1000
+delta_gen = 0.00001
+N_gen = 5000000
 true_decisions <- numeric()
+true_rejection <- numeric()
 
 flog.debug("We are working with Hawkes model, number of population is %s, number of neurons is %s, eta = %s, nu = %s, c_rate = %s", n_pop, toString(n_neur), toString(eta), toString(nu), toString(c_rate))
-for (k in 1:length(N_set)){
-  Z = hawkes_approximation(N = N_set[k], delta = delta_set[k], n_pop = n_pop, n_neur = n_neur, eta = eta, nu = nu, c_rate = c_rate, K = K)
-  res_trials <- numeric(N_trials)
-  for (i in 1:N_trials){
-    res_trials[i] <- round(gather_statistics(Z, delta_set[k]))
-  }
-  true_decisions[k] = length(which(res_trials == n_pop))/N_trials
-  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials trials is: %s", delta_set[k], N_set[k], N_trials, true_decisions[k])
-}
+R_noint <- matrix(nrow = length(delta_set), ncol = N_trials)
+test_normalized <- matrix(nrow = length(delta_set), ncol = N_trials)
 
-true_decisions
-hist(res_trials)
+# Setting up cluster
+# cl <- makeCluster(3)
+
+for (k in 1:length(delta_set)){
+  Z = hawkes_approximation(N = N_gen, delta = delta_gen, n_pop = n_pop, n_neur = n_neur, eta = eta, nu = nu, c_rate = c_rate, K = K)
+  Z_sub = Z[,seq(1,N_gen,as.integer(delta_set[k]/delta_gen))]
+  TEST <- lapply(c(1:N_trials), construct_test, Z = Z_sub, delta = delta_set[k])
+  cl <- makeCluster(4)
+  clusterExport(cl = cl, varlist = c("TEST", "delta_set", "n_pop", "N_trials", "k"))
+  R_noint[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) TEST[[i]][1]))
+  test_normalized[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) abs(TEST[[i]][1] - n_pop)/sqrt(delta_set[k]*TEST[[i]][2])))
+  # pdf(paste(path_to_logs, paste("R_noint_Hawkes_", format(Sys.time(), format = "%H:%M:%S"), ".pdf", sep=""), sep = "/"))
+  par(mfrow = c(2,1))
+  plot(density(R_noint[k,]), main = "Density of R_hat")
+  polygon(density(R_noint[k,]), col = my_colors[3])
+  plot(density(test_normalized[k,]), col = my_colors[1], main = "Density of normalized test statistics", ylim = c(0,0.8))
+  polygon(density(test_normalized[k,]), col = my_colors[1])
+  polygon(density(abs(rnorm(N_trials))), col = my_colors[2])
+  # dev.off()
+  true_decisions[k] = length(which(round(R_noint[k,]) == n_pop))/N_trials
+  #true_rejection[k] = length(which(test_h0[k,] == TRUE))/N_trials
+  true_rejection[k] = length(which(test_normalized[k,]>q_95))/N_trials
+  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials is: %s, null hypothesis is rejected in %s cases", delta_set[k], length(Z_sub[1,]), N_trials, true_decisions[k], true_rejection[k])
+}
+# stopCluster(cl)
+
+pdf(paste(path_to_logs, paste("R_density_Hawkes_", format(Sys.time(), format = "%H:%M:%S"), ".pdf", sep=""), sep = "/"))
+plot(density(R_noint[1,]), main = "", xlab = "", ylab = "", xlim = c(min(R_noint),max(R_noint)), ylim = c(0, mean(R_noint[2,])))
+polygon(density(R_noint[1,]), col = my_colors[1])
+polygon(density(R_noint[2,]),  col = my_colors[2])
+polygon(density(R_noint[3,]), col = my_colors[3])
+polygon(density(R_noint[4,]),  col = my_colors[4])
+legend("topleft", inset=.02, title="Size of delta",
+       c("0.1","0.01","0.001", "0.0001"), fill=my_colors, horiz=TRUE, cex=0.8)
+dev.off()
+
+write.csv(R_noint, file = paste(path_to_logs, paste("R_noint_Hawkes_", format(Sys.time(), format = "%H:%M")), sep = "/"), row.names = FALSE)
 
 ind_rough = numeric(n_pop)
 for (i in 1:n_pop){ind_rough[i] = sum(eta[1:i])+i}
 build_plot(Z, ind_rough)
 
-# now some experiments with FHN
+####### Experimental part: FHN model #######
 
 real_parameters <- c(1.5, 0.3, 0.1, 0.01, 0.6) # first set
 real_parameters <- c(1.2, 1.3, 0.1, 0.01, 0.4) # second set
 
-
-N_set = c(500, 5000, 50000)     # number of observations
-delta_set = c(0.1, 0.01, 0.001)    # discretization step 
-N_trials <- 1000
+delta_set = c(0.01, 0.001, 0.0001, 0.00001)    # discretization step 
+N_trials <- 100
 true_decisions <- numeric()
+true_rejection <- numeric()
+delta_gen = 0.00001
+N_gen = 5000000
+dim_true <- 1
 
 flog.debug("FitzHugh-Nagumo model, set: %s", toString(real_parameters))
+R_noint <- matrix(nrow = length(delta_set), ncol = N_trials)
+test_normalized <- matrix(nrow = length(delta_set), ncol = N_trials)
 
-for (k in 1:length(N_set)){
-  Z_h = FHN.simulate(parameters = real_parameters, N = N_set[k], delta = delta_set[k], class = 2)
-  res_trials <- numeric(N_trials)
-  for (i in 1:N_trials){
-    res_trials[i] <- round(gather_statistics(Z_h, delta_set[k]))
-  }
-  true_decisions[k] = length(which(res_trials == 2))/N_trials
-  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials trials is: %s", delta_set[k], N_set[k], N_trials, true_decisions[k])
+for (k in 1:length(delta_set)){
+  Z = FHN.simulate(parameters = real_parameters, N = N_gen, delta = delta_gen, class = dim_true)
+  Z_h = Z[,seq(1,N_gen,as.integer(delta_set[k]/delta_gen))]
+  TEST <- lapply(c(1:N_trials), construct_test, Z = Z_h, delta = delta_set[k])
+  cl <- makeCluster(4)
+  clusterExport(cl = cl, varlist = c("TEST", "delta_set", "dim_true", "N_trials", "k"))
+  R_noint[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) TEST[[i]][1]))
+  test_normalized[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) abs(TEST[[i]][1] - dim_true)/sqrt(delta_set[k]*TEST[[i]][2])))
+  stopCluster(cl)
+
+  # pdf(paste(path_to_logs, paste("R_noint_FHN_", format(Sys.time(), format = "%H:%M:%S"),".pdf",sep=""), sep = "/"))
+  par(mfrow = c(2,1))
+  plot(density(R_noint[k,]), main = "Density of R_hat")
+  polygon(density(R_noint[k,]), col = my_colors[3])
+  plot(density(test_normalized[k,]), main = "Density of normalized test statistics")
+  polygon(density(test_normalized[k,]), col = my_colors[1])
+  polygon(density(abs(rnorm(N_trials))), col = my_colors[2])
+  # dev.off()
+  
+  true_decisions[k] = length(which(round(R_noint[k,]) == dim_true))/N_trials
+  true_rejection[k] = length(which(test_normalized[k,]>q_95))/N_trials
+  
+  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials is: %s, null hypothesis is rejected in %s cases", delta_set[k], length(Z_h[1,]), N_trials, true_decisions[k], true_rejection[k])
 }
 
-true_decisions
+write.csv(R_noint, file = paste(path_to_logs, paste("R_noint_FHN_", format(Sys.time(), format = "%H:%M")), sep = "/"), row.names = FALSE)
+
+pdf(paste(path_to_logs, paste("R_density_FHN_", format(Sys.time(), format = "%H:%M:%S"), ".pdf", sep=""), sep = "/"))
+my_colors <- c(adjustcolor("skyblue", alpha.f = 0.5),  adjustcolor("chartreuse", alpha.f = 0.5), adjustcolor("coral", alpha.f = 0.5), adjustcolor("darkgoldenrod1", alpha.f = 0.5))
+plot(density(R_noint[3,]), main = "", xlab = "", ylab = "", xlim = c(min(R_noint),max(R_noint)))
+polygon(density(R_noint[1,]), col = my_colors[1])
+polygon(density(R_noint[2,]),  col = my_colors[2])
+polygon(density(R_noint[3,]), col = my_colors[3])
+legend("topleft", inset=.02, title="Size of delta",
+       c("0.1","0.01","0.001"), fill=my_colors[1:3], horiz=TRUE, cex=0.8)
+dev.off()
+
+##### Experiments: "pure Brownian motion"  ######
+
+# N_set = c(500, 5000, 50000, 500000)     # number of observations
+delta_set = c(0.1, 0.01, 0.001, 0.0001, 0.00001)    # discretization step 
+N_trials <- 1000
+true_decisions <- numeric()
+true_rejection <- numeric()
+delta_gen = 0.00001
+N_gen = 1000000
+dim_true <- 1
+
+flog.info("Brownian motion, dimension = %s", dim_true)
+R_noint <- matrix(nrow = length(delta_set), ncol = N_trials)
+test_normalized <- matrix(nrow = length(delta_set), ncol = N_trials)
+
+Z = BM.simulate(N = N_gen, delta = delta_gen, class = dim_true)
+for (k in length(delta_set)){
+  Z_h = Z[,seq(1,N_gen,as.integer(delta_set[k]/delta_gen))]
+  TEST <- lapply(c(1:N_trials), construct_test, Z = Z_h, delta = delta_set[k])
+  cl <- makeCluster(4)
+  clusterExport(cl = cl, varlist = c("TEST", "delta_set", "dim_true", "N_trials", "k"))
+  R_noint[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) TEST[[i]][1]))
+  test_normalized[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) abs(TEST[[i]][1] - dim_true)/sqrt(delta_set[k]*TEST[[i]][2])))
+  stopCluster(cl)
+  
+  # pdf(paste(path_to_logs, paste("R_noint_FHN_", format(Sys.time(), format = "%H:%M:%S"),".pdf",sep=""), sep = "/"))
+  par(mfrow = c(2,1))
+  plot(density(R_noint[k,]), main = "Density of R_hat")
+  polygon(density(R_noint[k,]), col = my_colors[3])
+  plot(density(test_normalized[k,]), main = "Density of normalized test statistics")
+  polygon(density(test_normalized[k,]), col = my_colors[1])
+  polygon(density(abs(rnorm(N_trials))), col = my_colors[2])
+  # dev.off()
+  true_decisions[k] = length(which(round(R_noint[k,]) == dim_true))/N_trials
+  true_rejection[k] = length(which(test_normalized[k,]>q_95))/N_trials
+  flog.debug("Percent of true decisions for Delta = %s, N = %s, for %s of trials is: %s, null hypothesis is rejected in %s cases", delta_set[k], length(Z_h[1,]), N_trials, true_decisions[k], true_rejection[k])
+  flog.debug("Standard deviation of R_hat is %s", (R_noint[k,]-dim_true)^2)
+}
+
+##### Another toy example #####
+
+f_t <- function(t){
+  return(1 + (2*t - 1)^2)
+}
+delta_gen = 0.0001
+N_gen = as.integer(1/delta_gen)
+S <- 0.5
+dim_true <- 2-ifelse((S==0), 1, 0)
+N_trials = 1000
+
+R_noint <- numeric()
+X <- numeric()
+Y <- numeric()
+X[1] <- 0
+Y[1] <- 0
+
+for (i in 1:(N_gen-1)){
+  X[i+1] <- X[i] + 2*delta_gen + f_t(i*delta_gen)*rnorm(1, sd = sqrt(delta_gen))*ifelse((i*delta_gen < S), 1, 0)
+  Y[i+1] <- Y[i] + 2*delta_gen + f_t(i*delta_gen)*rnorm(1, sd = sqrt(delta_gen))
+}
+
+Z_xy <- rbind(X, Y)
+
+TEST <- lapply(c(1:N_trials), construct_test, Z = Z_xy, delta = delta_gen)
+cl <- makeCluster(4)
+clusterExport(cl = cl, varlist = c("TEST", "delta_gen", "dim_true", "N_trials"))
+R_noint <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) TEST[[i]][1]))
+test_normalized <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) abs(TEST[[i]][1] - dim_true)/sqrt(delta_gen*TEST[[i]][2])))
+stopCluster(cl)
+
+# pdf(paste(path_to_logs, paste("R_noint_FHN_", format(Sys.time(), format = "%H:%M:%S"),".pdf",sep=""), sep = "/"))
+par(mfrow = c(2,1))
+plot(density(R_noint), main = "Density of R_hat")
+polygon(density(R_noint), col = my_colors[3])
+plot(density(test_normalized), main = "Density of normalized test statistics")
+polygon(density(test_normalized), col = my_colors[1])
+polygon(density(abs(rnorm(N_trials))), col = my_colors[2])
+# dev.off()
+
+true_decisions = length(which(round(R_noint) == dim_true))/N_trials
+true_rejection = length(which(test_normalized>q_95))/N_trials
+
+flog.debug("Percent of true decisions for Delta = %s, for %s of trials is: %s, null hypothesis is rejected in %s cases", delta_gen, N_trials, true_decisions, true_rejection)
