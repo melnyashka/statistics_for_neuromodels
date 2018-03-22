@@ -1,7 +1,7 @@
 # First we generate the process with arbitrary number of memory variables 
 require(MASS)
 require(Rcpp)
-require(inline)
+# require(inline)
 require(futile.logger) # setting up logging
 require(parallel)
 sourceCpp("example.cpp")
@@ -128,6 +128,7 @@ construct_test <- function(Z, delta, j){
   if (is.null(dimZ)) {
     d = 1
     N = length(Z)
+    Z = t(as.matrix(Z))
   } else {
     d = dimZ[1]
     N = dimZ[2]
@@ -135,16 +136,11 @@ construct_test <- function(Z, delta, j){
   
   # modify the process, generating another Brownian motion
   if (d==1) {
-    W_d <- cumsum(rnorm(n = N, mean = 0, sd = sqrt(delta)))
+    W_d <- t(as.matrix(cumsum(rnorm(n = N, mean = 0, sd = sigma*sqrt(delta)))))
     } else {
-      W <- t(mvrnorm(n = N, mu = rep(0, times = d), Sigma = sqrt(delta)*diag(d)))
-      W_d <- matrix(unlist(lapply(c(1:d), function(i) cumsum(W[i,]))), nrow = d, byrow = FALSE)
+      W <- t(mvrnorm(n = N, mu = rep(0, times = d), Sigma = sigma*sqrt(delta)*diag(d)))
+      W_d <- matrix(unlist(lapply(c(1:d), function(i) cumsum(W[i,]))), nrow = d, byrow = TRUE)
       }
-  # if (d==1) {
-  #   W_d <- sigma*rnorm(n = N, mean = 0, sd = sqrt(delta))
-  # } else {
-  #   W_d <- sigma*t(mvrnorm(n = N, mu = rep(0, times = d), Sigma = sqrt(delta)*diag(d)))
-  # }
   
   Z1 = add_rcpp(Z,(delta)^(1/2)*W_d)
   Z2 = add_rcpp(Z,(2*delta)^(1/2)*W_d)
@@ -157,9 +153,14 @@ construct_test <- function(Z, delta, j){
   
   Z_mat1 <- lapply(c(1:i_lim), function(i) (Z1[,(2*d*i+1):(2*d*i+d)]-Z1[,(2*d*i):(2*d*i+d-1)])/sqrt(delta))
   Z_mat2 <- lapply(c(1:i_lim), function(i) (Z2[,seq(from = (2*d*i+2), to = (2*d*i+2*d), by = 2)]-Z2[,seq(from = (2*d*i), to = (2*d*i+2*d-2), by = 2)])/sqrt(2*delta))
-  S1_vec <- unlist(lapply(Z_mat1, edet))
-  S2_vec <- unlist(lapply(Z_mat2, edet))
-  
+  if (d==1){
+    S1_vec <- unlist(lapply(Z_mat1, function(x) x^2))
+    S2_vec <- unlist(lapply(Z_mat2, function(x) x^2))
+  } else {
+    S1_vec <- unlist(lapply(Z_mat1, edet))
+    S2_vec <- unlist(lapply(Z_mat2, edet))
+  }
+
   S1 <- 2*d*delta*sum_rcpp(S1_vec)
   S2 <- 2*d*delta*sum_rcpp(S2_vec) 
   
@@ -193,14 +194,14 @@ q_999 <- 3.290527
 
 n_pop = 2 # number of populations
 n_neur = c(20, 20) # number of neurons in population, vector of integers of length N
-eta = c(2,2) # number of memory variables, vector of integers of length N
+eta = c(3,3) # number of memory variables, vector of integers of length N
 nu = c(1,1) # auxilliary constants
 c_rate = c(-1,1) # rates of population
 K = c(1, 10) # constants for the rate functions
 
 # N_set = c(500, 5000, 50000, 500000)     # number of observations
 delta_set = c(0.1, 0.01, 0.001, 0.0001, 0.00001)    # discretization step 
-N_trials <- 1000
+N_trials <- 100
 delta_gen = 0.00001
 N_gen = 5000000
 true_decisions <- numeric()
@@ -255,14 +256,14 @@ build_plot(Z, ind_rough)
 ####### Experimental part: FHN model #######
 
 real_parameters <- c(1.5, 0.3, 0.1, 0.01, 0.6) # first set
-real_parameters <- c(1.2, 1.3, 0.1, 0.01, 0.4) # second set
+# real_parameters <- c(1.2, 1.3, 0.1, 0.01, 0.4) # second set
 
-delta_set = c(0.01, 0.001, 0.0001, 0.00001)    # discretization step 
-N_trials <- 100
+delta_set = c(0.1, 0.01, 0.001, 0.0001, 0.00001)    # discretization step 
+N_trials <- 1000
 true_decisions <- numeric()
 true_rejection <- numeric()
 delta_gen = 0.00001
-N_gen = 5000000
+N_gen = 1000000
 dim_true <- 1
 
 flog.debug("FitzHugh-Nagumo model, set: %s", toString(real_parameters))
@@ -321,10 +322,10 @@ flog.info("Brownian motion, dimension = %s", dim_true)
 R_noint <- matrix(nrow = length(delta_set), ncol = N_trials)
 test_normalized <- matrix(nrow = length(delta_set), ncol = N_trials)
 
-Z = BM.simulate(N = N_gen, delta = delta_gen, class = dim_true)
-for (k in length(delta_set)){
+Z = BM.simulate(N = N_gen, delta = delta_gen, class = 2)
+for (k in 1:length(delta_set)){
   Z_h = Z[,seq(1,N_gen,as.integer(delta_set[k]/delta_gen))]
-  TEST <- lapply(c(1:N_trials), construct_test, Z = Z_h, delta = delta_set[k])
+  TEST <- lapply(c(1:N_trials), construct_test, Z = Z_h[1,], delta = delta_set[k])
   cl <- makeCluster(4)
   clusterExport(cl = cl, varlist = c("TEST", "delta_set", "dim_true", "N_trials", "k"))
   R_noint[k,] <- unlist(parLapply(cl = cl, c(1:N_trials), function(i) TEST[[i]][1]))
